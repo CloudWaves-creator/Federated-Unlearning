@@ -274,6 +274,9 @@ def run_quickdrop(
     G = deepcopy(global_model).to(device)
     G.train()
 
+    total_unlearn_time = 0.0
+
+
     # 输出目录（仿照 retraining 的组织方式）
     exp_root = os.path.abspath(os.path.join(args.exp_path, args.exp_name))
     out_root = os.path.join(exp_root, "quickdrop")
@@ -326,13 +329,18 @@ def run_quickdrop(
                     {"images": syn_img, "labels": syn_lab},
                     os.path.join(affine_root, f"round_{round_idx}_client_{cid}.pt"),
                 )
-            # 只用合成集进行本地微调
+
+            # --- 计时开始：仅计算利用合成集进行模型更新的时间 ---
+            t_train_start = time.time()
             m_loc = _local_train_on_syn(args=args, global_model=G, syn_ds=syn_ds, device=device)
             local_models.append(m_loc)
+            total_unlearn_time += (time.time() - t_train_start)
 
         # === Server aggregation ===
+        t_agg_start = time.time()
         avg_state = _state_dict_average(local_models)
         G.load_state_dict(avg_state)
+        total_unlearn_time += (time.time() - t_agg_start)
 
         # 可选：保存该轮全局
         iter_dir = os.path.join(out_root, f"iteration_{round_idx}")
@@ -341,6 +349,6 @@ def run_quickdrop(
 
     # final
     torch.save(G.state_dict(), os.path.join(out_root, "final_model.pth"))
-    info = {"weights_dir": out_root}
+    info = {"weights_dir": out_root, "unlearn_time": total_unlearn_time}
     # 保持与调用时一致的设备，避免评测阶段 device 不匹配
     return G.to(device), info

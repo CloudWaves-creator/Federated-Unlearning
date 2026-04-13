@@ -368,6 +368,7 @@ def _fair_vue_delta_cache_key(train_path: str,
         "total_clients": int(total_clients),
         "target_id": int(target_id),
         "param_keys": list(param_keys or []),
+        "layer_mode": str(getattr(args, 'fair_layer_mode', 'classifier')),
         "fair_target_rounds": int(fair_target_rounds),
         "version": 1,  # 以后改格式可以+1，强制失效旧 cache
     }
@@ -558,7 +559,7 @@ parser.add_argument('--baselines', type=str, nargs="*", default=[],
     help='baseline methods for unlearning')
 
 # ===== PGA 超参（显式控制遗忘强度） =====
-parser.add_argument('--pga_alpha', type=float, default=18000,
+parser.add_argument('--pga_alpha', type=float, default=20000,
     help='核心：PGA: unlearning strength factor (scales both distance threshold and gradient-ascent step size)')
 parser.add_argument('--pga_unlearn_rounds', type=int, default=5,
     help='PGA: number of gradient-ascent epochs on the forget client data')
@@ -585,7 +586,7 @@ parser.add_argument('--fast_expected_saving', type=int, default=5,
     help='fast-fU: expected number of saved client updates (m)')
 parser.add_argument('--fast_alpha', type=float, default=1,
     help='核心：fast-fU: alpha coefficient')
-parser.add_argument('--fast_theta', type=float, default=68.75,
+parser.add_argument('--fast_theta', type=float, default=35.475,
     help='优先核心：fast-fU: theta scaling for unlearning term')
 
 # ---------- QuickDrop 超参（贴近原实现命名/语义） ----------
@@ -657,6 +658,9 @@ parser.add_argument('--fair_target_rounds', type=int, default=200,
                     help='仅取最近 R 轮目标客户端增量')
 parser.add_argument('--fair_rho_max_samples', type=int, default=128,
                     help='ρ 的其它客户端子采样上限（默认 128）')
+parser.add_argument('--fair_layer_mode', type=str, default='classifier',
+                    choices=['classifier', 'deep', 'all'],
+                    help='FAIR-VUE: 指定参与子空间构建的层 (classifier: 仅头, deep: 头+深层, all: 全参数)')
 parser.add_argument('--fair_use_delta_cache', type=str2bool, default=True,
                     help='FAIR-VUE: 是否启用逐轮增量缓存（默认开启）')
 parser.add_argument('--fair_fisher_type', type=str, default='diagonal', choices=['diagonal', 'full'],
@@ -1684,11 +1688,26 @@ if __name__ == "__main__":
             fair_model.eval()
             # —— 参与子空间的参数集合：优先分类头参数，兼容多种命名
             all_param_keys = [name for name, p in fair_model.named_parameters() if p.requires_grad]
-            preferred = ("fc.", "linear.", "classifier.", "head.")
-            param_keys = [k for k in all_param_keys if any(k.startswith(pref) for pref in preferred)]
-            if len(param_keys) == 0:
-                # 兜底：取最后若干层（通常是分类头），避免空集合
-                param_keys = all_param_keys[-min(4, len(all_param_keys)):]
+            
+            if args.fair_layer_mode == 'all':
+                # 模式1: 全量参数
+                param_keys = all_param_keys
+            elif args.fair_layer_mode == 'deep':
+                # 模式2: 深层特征 + 分类头 (ResNet: layer4 + fc; SmallCNN: 最后50%层)
+                preferred_head = ("fc.", "linear.", "classifier.", "head.")
+                preferred_deep = ("layer4.", "layer3.", "conv3.", "conv2.") # 常见深层命名
+                param_keys = [k for k in all_param_keys if any(k.startswith(p) for p in preferred_head + preferred_deep)]
+                if len(param_keys) < len(all_param_keys) * 0.1: # 兜底，防止没匹配上
+                    param_keys = all_param_keys[-(len(all_param_keys)//2):]
+            else:
+                # 模式3: (默认) 仅分类头
+                preferred = ("fc.", "linear.", "classifier.", "head.")
+                param_keys = [k for k in all_param_keys if any(k.startswith(pref) for pref in preferred)]
+                if len(param_keys) == 0:
+                    param_keys = all_param_keys[-min(4, len(all_param_keys)):]
+
+            print(f"[FAIR-VUE] Layer Mode: {args.fair_layer_mode}, Params selected: {len(param_keys)} / {len(all_param_keys)}")
+
             if args.fair_vue_debug:
                 print(f"[FV-DBG] param_keys selected (n={len(param_keys)}): {param_keys[:6]}{'...' if len(param_keys)>6 else ''}")
             from FedUnlearner.baselines.fair_vue.subspace import (
@@ -2426,7 +2445,9 @@ if __name__ == "__main__":
                 num_classes=num_classes,
                 device=args.device,
             )
-            qd_time_sec = time.time() - _t0
+            # 优先使用内部记录的纯遗忘时间（不含合成图像的迭代过程）
+            qd_time_sec = qd_info.get("unlearn_time", time.time() - _t0)
+            print(f"[Timing] QuickDrop pure unlearn time: {qd_time_sec:.2f}s")
 
             # ==== 六项指标统一打印（QuickDrop）====
             test_acc_qd    = get_accuracy_only(qd_model, test_dataloader, args.device)

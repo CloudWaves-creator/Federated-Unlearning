@@ -328,8 +328,8 @@ def print_forgetting_metrics(method_name: str,
 
 
     print(f"[指标/{method_name}] "
-        f"测试集准确率={fmt(test_acc,4)}  "
         f"保留集准确率={fmt(retain_acc,4)}  "
+        f"测试集准确率={fmt(test_acc,4)}  "
         f"遗忘客户端准确率={fmt(target_acc,4)}  "
         f"遗忘客户端平均交叉熵={fmt(target_loss,4)}  "
         f"加速比={fmt(speedup_x,2)}×  "
