@@ -41,8 +41,10 @@ def create_poisoning_dataset(clientwise_dataset, forget_clients, num_poisoning_s
     for client_id, dataset in clientwise_dataset.items():
 
         if client_id in forget_clients:
+            # [种子锁定] 使用独立 RandomState，避免污染全局 np.random 状态
+            _rng = np.random.RandomState(42 + client_id)
             idx = np.arange(len(dataset))
-            poisoning_train_idx = np.random.choice(
+            poisoning_train_idx = _rng.choice(
                 len(dataset), num_poisoning_samples, replace=False)
             remaining_idx = np.setdiff1d(idx, poisoning_train_idx)
 

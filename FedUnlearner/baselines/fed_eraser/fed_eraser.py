@@ -205,7 +205,9 @@ def run_fed_eraser(
         for r in range(num_post_training_rounds):
             local_weights = []
             # Subsample retain clients to speed up if many
-            round_clients = retain_cids if len(retain_cids) < 10 else random.sample(retain_cids, 10)
+            # [种子锁定] 使用固定种子 + 轮次偏移，确保每轮子采样可复现
+            _rng = random.Random(42 + r)
+            round_clients = retain_cids if len(retain_cids) < 10 else _rng.sample(retain_cids, 10)
             
             for cid in round_clients:
                 # print(f"Repairing on Client {cid}...")

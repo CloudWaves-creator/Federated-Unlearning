@@ -1,9 +1,11 @@
 
 import os
 import math
+import random as _random
 from copy import deepcopy
 from typing import Dict, Tuple, List
 
+import numpy as _np
 import time
 import torch
 import torch.nn as nn
@@ -12,6 +14,12 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from FedUnlearner.models import AllCNN, ResNet18, SmallCNN
 from FedUnlearner.utils import get_labels_from_dataset  # 按类统计/索引  :contentReference[oaicite:3]{index=3}
+
+# [种子锁定] QuickDrop 专用 worker_init_fn
+def _qd_worker_init_fn(worker_id: int):
+    worker_seed = torch.initial_seed() % 2**32
+    _np.random.seed(worker_seed)
+    _random.seed(worker_seed)
 
 import os
 def _build_model(args, num_classes: int) -> nn.Module:
@@ -132,8 +140,9 @@ def _distill_dc(
         n_syn = per_class[c]
         if n_syn <= 0:
             continue
-        # 随机抽取 n_syn 个真实样本作为起点
-        choice = torch.randint(low=0, high=len(idxs), size=(n_syn,)) if len(idxs) > 0 else torch.empty(0,dtype=torch.long)
+        # [种子锁定] 随机抽取 n_syn 个真实样本作为起点（使用 generator）
+        _qd_gen = torch.Generator().manual_seed(42 + c)
+        choice = torch.randint(low=0, high=len(idxs), size=(n_syn,), generator=_qd_gen) if len(idxs) > 0 else torch.empty(0,dtype=torch.long)
         for k in range(n_syn):
             ridx = idxs[ int(choice[k]) ]
             # 通过 DataLoader 的底层 Dataset 取原图
@@ -168,7 +177,9 @@ def _distill_dc(
         g_real = _grad_list(model, loss_real, create_graph=False)
 
         # 合成梯度（需要对“图像变量”反传 → 必须 create_graph=True）
-        idx_syn = torch.randperm(images_syn.size(0), device=device)[:min(images_syn.size(0), args.qd_batch_syn)]
+        # [种子锁定] 使用 CPU generator 后转移到目标 device
+        _perm_gen = torch.Generator().manual_seed(42 + it)
+        idx_syn = torch.randperm(images_syn.size(0), generator=_perm_gen).to(device)[:min(images_syn.size(0), args.qd_batch_syn)]
         xs, ys = images_syn[idx_syn], labels_syn[idx_syn]
         # 前向 → 损失 → 对“网络参数”的梯度（梯度需带图，才能对 xs 反传）
         loss_syn = criterion(model(xs), ys)
@@ -214,7 +225,10 @@ def _local_train_on_syn(
     if len(syn_ds) == 0:
         return model
     epochs = int(args.qd_local_epochs) if args.qd_local_epochs else int(args.num_local_epochs)
-    loader = DataLoader(syn_ds, batch_size=min(len(syn_ds), max(1, args.qd_batch_syn)), shuffle=True)
+    # [种子锁定] 合成集 DataLoader 使用 generator + worker_init_fn
+    _syn_gen = torch.Generator().manual_seed(42)
+    loader = DataLoader(syn_ds, batch_size=min(len(syn_ds), max(1, args.qd_batch_syn)), shuffle=True,
+                        generator=_syn_gen, worker_init_fn=_qd_worker_init_fn)
     
     # [Fix] 使用专用遗忘参数，如果未设置则回退到全局参数
     _lr = args.qd_unlearn_lr if (hasattr(args, 'qd_unlearn_lr') and args.qd_unlearn_lr is not None) else args.lr

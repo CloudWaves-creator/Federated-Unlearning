@@ -29,6 +29,7 @@ def fair_vue_unlearn(global_model: torch.nn.Module,
                      fisher_batches: int = 10,
                      device: str = "cpu",
                      *,
+                     seed: int = 42,
                      # 新增：客户端 Fisher 端点或回调（任选其一）。两者都缺省时，将不触碰原始数据，回退为单位权重。
                      client_endpoints: Dict[int, object] = None,
                      compute_fisher_fn=None) -> Dict[str, torch.Tensor]:
@@ -41,11 +42,12 @@ def fair_vue_unlearn(global_model: torch.nn.Module,
     target_id = forget_clients[0]
     others = [cid for cid in client_deltas if cid != target_id]
     target_deltas = [client_deltas[target_id]]
-    # Fisher (固定随机性，确保完整流程与简化流程结果一致)
+    # [种子锁定] 固定随机性（使用调用方传入的 seed，而非硬编码 42）
     import random, numpy as np
-    torch.manual_seed(42)
-    np.random.seed(42)
-    random.seed(42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 

@@ -136,6 +136,26 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 # ——————————————
+# [种子锁定] 全局种子工具函数：统一锁定 Python/NumPy/PyTorch/CUDA/cuDNN
+def seed_everything(seed: int):
+    """一站式锁定所有随机源，确保完全可复现。"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def _worker_init_fn(worker_id: int):
+    """DataLoader worker 进程种子初始化：确保多 worker 下数据增强可复现。
+    PyTorch 会自动为每个 worker 设置 torch 种子（base_seed + worker_id），
+    但 numpy/random 不受控，需要手动派生。"""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+# ——————————————
 
 def get_accuracy_only(model, dataloader, device):
     model = model.to(device)
@@ -832,12 +852,7 @@ if __name__ == "__main__":
 
     # 设置随机种子
     if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        seed_everything(args.seed)
 
     if args.client_data_distribution == 'dirichlet':
         clientwise_dataset = create_dirichlet_data_distribution(train_dataset,
@@ -911,9 +926,16 @@ if __name__ == "__main__":
     clientwise_dataloaders = {}
     for client_id, client_dataset in clientwise_dataset.items():
         print(f"Creating data loader for client: {client_id}")
+        # [种子锁定] 为每个客户端创建独立的 Generator，确保 shuffle 顺序可复现
+        _dl_gen = torch.Generator()
+        _dl_seed = (args.seed + client_id) if args.seed is not None else client_id
+        _dl_gen.manual_seed(_dl_seed)
         client_dataloader = torch.utils.data.DataLoader(
             client_dataset, batch_size=args.batch_size, shuffle=True, 
-            num_workers=args.num_workers, drop_last=True, pin_memory=True, persistent_workers=(args.num_workers > 0))
+            num_workers=args.num_workers, drop_last=True, pin_memory=True,
+            persistent_workers=(args.num_workers > 0),
+            generator=_dl_gen,
+            worker_init_fn=_worker_init_fn)
         clientwise_dataloaders[client_id] = client_dataloader
     
     # === 本地 Fisher 端点：客户端持有数据；服务端仅“请求 Fisher”，不触碰原始样本 ===
@@ -961,16 +983,18 @@ if __name__ == "__main__":
             # [关键修复] 临时创建一个全新的 DataLoader，彻底隔离 MIA 的影响
             # 无论之前 MIA 是否遍历过 self.loader，这里都强制使用固定种子生成新的迭代顺序
             g_fisher = torch.Generator()
-            g_fisher.manual_seed(42) # 强力固定 Fisher 计算的数据顺序
+            _fisher_dl_seed = self.args.seed if self.args.seed is not None else 42
+            g_fisher.manual_seed(_fisher_dl_seed)
             
-            # 复用原 loader 的参数，但注入 generator
+            # 复用原 loader 的参数，但注入 generator + worker_init_fn
             temp_loader = torch.utils.data.DataLoader(
                 self.loader.dataset,
                 batch_size=self.loader.batch_size,
                 shuffle=True,
                 num_workers=self.loader.num_workers,
                 drop_last=self.loader.drop_last,
-                generator=g_fisher
+                generator=g_fisher,
+                worker_init_fn=_worker_init_fn
             )
 
             if fisher_type == 'full':
@@ -997,7 +1021,9 @@ if __name__ == "__main__":
         for cid, loader in clientwise_dataloaders.items()
     }    
     test_dataloader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=args.batch_size*2, shuffle=False, num_workers=args.num_workers, pin_memory=True, persistent_workers=(args.num_workers > 0))
+        test_dataset, batch_size=args.batch_size*2, shuffle=False, num_workers=args.num_workers,
+        pin_memory=True, persistent_workers=(args.num_workers > 0),
+        worker_init_fn=_worker_init_fn)
 
     # train the model
     global_model = None
@@ -1206,10 +1232,12 @@ if __name__ == "__main__":
         _n_test = len(test_dataloader.dataset)
         _n_shadow_nonmem = int(0.8 * _n_test)
         _n_eval_nonmem   = _n_test - _n_shadow_nonmem
-        _gen = torch.Generator().manual_seed(args.seed if hasattr(args, "seed") else 0)
+        _gen = torch.Generator().manual_seed(args.seed if args.seed is not None else 0)
         _shadow_nm_ds, _eval_nm_ds = random_split(test_dataloader.dataset, [_n_shadow_nonmem, _n_eval_nonmem], generator=_gen)
-        mia_shadow_nonmem_loader = _DL(_shadow_nm_ds, batch_size=test_dataloader.batch_size, shuffle=False, num_workers=args.num_workers)
-        mia_eval_nonmem_loader   = _DL(_eval_nm_ds,    batch_size=test_dataloader.batch_size, shuffle=False, num_workers=args.num_workers)
+        mia_shadow_nonmem_loader = _DL(_shadow_nm_ds, batch_size=test_dataloader.batch_size, shuffle=False,
+                                       num_workers=args.num_workers, worker_init_fn=_worker_init_fn)
+        mia_eval_nonmem_loader   = _DL(_eval_nm_ds,    batch_size=test_dataloader.batch_size, shuffle=False,
+                                       num_workers=args.num_workers, worker_init_fn=_worker_init_fn)
 
     # —— 自检日志只在 --mia_verbose 时打印 —— 
     if args.mia_verbose:
@@ -1815,9 +1843,7 @@ if __name__ == "__main__":
             # ==========================================================
             # [Fix] 强制重置种子，防止 MIA 等前置操作消耗随机状态导致调参采样不一致
             if args.seed is not None:
-                torch.manual_seed(args.seed)
-                np.random.seed(args.seed)
-                random.seed(args.seed)
+                seed_everything(args.seed)
 
             if args.fair_auto_tune_all:
                 if args.fair_vue_debug:
@@ -1907,11 +1933,9 @@ if __name__ == "__main__":
 
 
             # 3) Fisher（遗忘指令下发 → 目标客户端本地计算 → 仅上传 Fisher 对角）
-            #    与 pipeline 保持一致：为 Fisher 批次固定随机性，避免抽样差异带来系统性偏移
-            import random, numpy as np, torch
-            torch.manual_seed(42); np.random.seed(42); random.seed(42)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
+            #    固定随机性，避免抽样差异带来系统性偏移（使用 args.seed 而非硬编码）
+            _fisher_seed = args.seed if args.seed is not None else 42
+            seed_everything(_fisher_seed)
             if target_id in client_endpoints:
                 fisher = client_endpoints[target_id].compute_fisher(
                     model_state_dict=fair_model.state_dict(),

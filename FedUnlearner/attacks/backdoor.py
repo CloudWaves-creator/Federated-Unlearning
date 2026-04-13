@@ -54,8 +54,10 @@ def create_backdoor_dataset(clientwise_dataset, forget_clients, backdoor_pixels,
     for client_id, dataset in clientwise_dataset.items():
         if client_id in forget_clients:
             # Select the dataset indices
-            idx = np.arange(len(dataset))#list(range(len(dataset)))
-            np.random.shuffle(idx)
+            # [种子锁定] 使用独立 RandomState，避免污染全局 np.random 状态
+            _rng = np.random.RandomState(42 + client_id)
+            idx = np.arange(len(dataset))
+            _rng.shuffle(idx)
             backdoor_train_idx = idx[:num_samples].tolist()
             backdoor_test_idx = idx[num_samples:num_samples+int(len(dataset)*0.2)].tolist()
             
