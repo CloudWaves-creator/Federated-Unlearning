@@ -163,7 +163,7 @@ def shrink_mia_result(res):
             return float(x)
         except Exception:
             return None
-    acc=prec=rec=f1=None
+    acc=prec=rec=f1=auc=None
     if isinstance(res, dict):
         m={k.lower().replace('-','_'):k for k in res.keys()}
         def g(*names):
@@ -178,16 +178,19 @@ def shrink_mia_result(res):
         prec= g('precision','precision_score')
         rec = g('recall','recall_score')
         f1  = g('f1','f1_score')
+        auc = g('auc','roc_auc_score','roc_auc','mia_attacker_auc')
     elif isinstance(res, (list, tuple)):
         if len(res)>0: prec=res[0]
         if len(res)>1: rec =res[1]
         if len(res)>2: f1  =res[2]
+        if len(res)>3: auc =res[3]
     # 返回统一瘦身结果
     return {
         'accuracy': _to_float(acc),
         'precision': _to_float(prec),
         'recall': _to_float(rec),
         'f1': _to_float(f1),
+        'auc': _to_float(auc),
     }
 
 

@@ -241,9 +241,11 @@ def evaluate_mia_attack(target_model: torch.nn.Module,
         pass
 
     # —— AUC 与混淆矩阵（0.5 阈值）——
+    final_auc = None
     try:
         from sklearn.metrics import roc_auc_score, confusion_matrix
         _auc = roc_auc_score(combined_Y, pred_proba_Y)
+        final_auc = _auc
         _cm  = confusion_matrix(combined_Y, pred_Y)
         if _cm.size == 4:
             tn, fp, fn, tp = _cm.ravel()
@@ -271,6 +273,15 @@ def evaluate_mia_attack(target_model: torch.nn.Module,
     results['mia_attacker_precision'] = precision
     results['mia_attacker_recall'] = recall
     results['mia_attacker_f1'] = f1
+    
+    # === 针对 TIFS 新增的核心安全指标 ===
+    if final_auc is not None:
+        results['mia_attacker_auc'] = final_auc
+        
+    # 提取目标模型本身对 Member 和 Non-member 的最大预测概率（置信度），用于后期绘制置信度分布图
+    results['target_member_confidence'] = unlearn_X.max(axis=1).tolist()
+    results['target_nonmember_confidence'] = test_X.max(axis=1).tolist()
+
     results['mia_attacker_predictions'] = pred_Y.tolist()
     results['mia_attacker_probabilities'] = pred_proba_Y.tolist()
 

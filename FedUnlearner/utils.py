@@ -227,8 +227,8 @@ def print_forgetting_metrics(method_name: str,
 
     # ---- 统一解析 MIA 结果（兼容 dict / tuple / list / np / torch / str）----
     def _parse_mia(res):
-        """尽量从多种返回类型中抽取 (precision, recall, f1) 三个标量."""
-        prec = rec = f1 = None
+        """尽量从多种返回类型中抽取 (precision, recall, f1, auc) 四个标量."""
+        prec = rec = f1 = auc = None
         import re as _re
         try:
             import numpy as _np
@@ -265,6 +265,7 @@ def print_forgetting_metrics(method_name: str,
             prec = _get_exact("precision", "precision_score", "p")
             rec  = _get_exact("recall",    "recall_score",    "r")
             f1   = _get_exact("f1", "f1_score", "f1score")
+            auc  = _get_exact("auc", "roc_auc_score", "roc_auc", "mia_attacker_auc")
             # 模糊包含（如 mia_attacker_precision / avg_precision 也可命中）
             if prec is None:
                 for lk, ok in lower_map.items():
@@ -285,22 +286,28 @@ def print_forgetting_metrics(method_name: str,
                         if "f1" in lk:   # 兜底：包括 mia_attacker_f1 等
                             preferred = res[ok]; break
                 f1 = preferred
-            return _to_float(prec), _to_float(rec), _to_float(f1)
+            if auc is None:
+                for lk, ok in lower_map.items():
+                    if "auc" in lk:
+                        auc = res[ok]; break
+            return _to_float(prec), _to_float(rec), _to_float(f1), _to_float(auc)
 
-        # 2) tuple / list / numpy / torch: 按 (P,R,F1) 读取
+        # 2) tuple / list / numpy / torch: 按 (P,R,F1,AUC) 读取
         if isinstance(res, (list, tuple)):
             arr = list(res)
             if len(arr) >= 1: prec = arr[0]
             if len(arr) >= 2: rec  = arr[1]
             if len(arr) >= 3: f1   = arr[2]
-            return _to_float(prec), _to_float(rec), _to_float(f1)
+            if len(arr) >= 4: auc  = arr[3]
+            return _to_float(prec), _to_float(rec), _to_float(f1), _to_float(auc)
         try:
             import numpy as _np
             if isinstance(res, _np.ndarray):
                 arr = res.flatten().tolist()
                 return (_to_float(arr[0]) if len(arr)>0 else None,
                         _to_float(arr[1]) if len(arr)>1 else None,
-                        _to_float(arr[2]) if len(arr)>2 else None)
+                        _to_float(arr[2]) if len(arr)>2 else None,
+                        _to_float(arr[3]) if len(arr)>3 else None)
         except Exception:
             pass
         try:
@@ -309,7 +316,8 @@ def print_forgetting_metrics(method_name: str,
                 arr = res.flatten().tolist()
                 return (_to_float(arr[0]) if len(arr)>0 else None,
                         _to_float(arr[1]) if len(arr)>1 else None,
-                        _to_float(arr[2]) if len(arr)>2 else None)
+                        _to_float(arr[2]) if len(arr)>2 else None,
+                        _to_float(arr[3]) if len(arr)>3 else None)
         except Exception:
             pass
 
@@ -317,14 +325,14 @@ def print_forgetting_metrics(method_name: str,
         if isinstance(res, str):
             m = _re.findall(r"([0-9]*\.?[0-9]+)", res)
             if m:
-                vals = [float(x) for x in m[:3]]
-                while len(vals) < 3: vals.append(None)
-                return vals[0], vals[1], vals[2]
+                vals = [float(x) for x in m[:4]]
+                while len(vals) < 4: vals.append(None)
+                return vals[0], vals[1], vals[2], vals[3]
 
-        return None, None, None
+        return None, None, None, None
 
-    p_val, r_val, f1_val = _parse_mia(mia_result)
-    mia_str = f"P={fmt(p_val,3)}, R={fmt(r_val,3)}, F1={fmt(f1_val,3)}" if any(v is not None for v in (p_val, r_val, f1_val)) else "NA"
+    p_val, r_val, f1_val, auc_val = _parse_mia(mia_result)
+    mia_str = f"AUC={fmt(auc_val,3)}, F1={fmt(f1_val,3)}, P={fmt(p_val,3)}, R={fmt(r_val,3)}" if any(v is not None for v in (p_val, r_val, f1_val, auc_val)) else "NA"
 
 
     print(f"[指标/{method_name}] "
